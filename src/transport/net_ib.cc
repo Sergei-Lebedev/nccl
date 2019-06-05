@@ -85,6 +85,27 @@ static void* ncclIbAsyncThreadMain(void* args) {
 
 NCCL_PARAM(IbDisable, "IB_DISABLE", 0);
 
+int extractDigits(const char* name){
+  //device name is always strarts with mlx5_
+  int i = 5;
+  int num = 0;
+  while(isdigit(name[i])){
+    num = num* 10 + (name[i] - '0');
+    i++;    
+  }
+  return num;
+}
+
+int compare(const void *a, const void *b){
+  const struct ncclIbDev *dev1, *dev2;
+  dev1 = (ncclIbDev*)a;
+  dev2 = (ncclIbDev*)b;
+  int nDev1, nDev2;
+  nDev1 = extractDigits(dev1->devName);
+  nDev2 = extractDigits(dev2->devName);
+  return nDev1 < nDev2;
+  
+}
 ncclResult_t ncclIbInit(ncclDebugLogger_t logFunction) {
   if(wrap_ibv_symbols() != ncclSuccess) { return ncclInternalError; }
   if (ncclParamIbDisable()) return ncclInternalError;
@@ -154,6 +175,7 @@ ncclResult_t ncclIbInit(ncclDebugLogger_t logFunction) {
       }
       if (nIbDevs && (ncclSuccess != wrap_ibv_free_device_list(devices))) { return ncclInternalError; };
     }
+    qsort(ncclIbDevs, ncclNIbDevs, sizeof(struct ncclIbDev), compare);
     if (ncclNIbDevs == 0) {
       INFO(NCCL_INIT|NCCL_NET, "NET/IB : No device found.");
     } else {
