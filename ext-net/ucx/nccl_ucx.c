@@ -145,6 +145,7 @@ __hidden ncclResult_t ucx_pci_path(int dev, char** path) {
 }
 
 __hidden ncclResult_t ucx_ptr_support(int dev, int* supported_types) {
+  *supported_types = (NCCL_PTR_HOST | NCCL_PTR_CUDA);
   return ncclSuccess;
 }
 
@@ -278,10 +279,19 @@ __hidden ncclResult_t ucx_accept(void* listen_comm, void** recv_comm) {
 }
 
 __hidden ncclResult_t ucx_regmr(void* comm, void* data, int size, int type, void** mhandle){
+  ucp_mem_map_params_t mmap_params;
+  mmap_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
+                           UCP_MEM_MAP_PARAM_FIELD_LENGTH  |
+                           UCP_MEM_MAP_PARAM_FIELD_FLAGS;
+  mmap_params.address    = (uint64_t)data;
+  mmap_params.length     = size;
+  mmap_params.flags      = UCP_MEM_MAP_FIXED;
+  ucp_mem_map(ucp_context, &mmap_params, mhandle);
   return ncclSuccess;
 }
 
 __hidden ncclResult_t ucx_deregmr(void* comm, void* mhandle){
+  ucp_mem_unmap(ucp_context, mhandle);
   return ncclSuccess;
 }
 
