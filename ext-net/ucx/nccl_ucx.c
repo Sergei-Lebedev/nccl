@@ -8,6 +8,7 @@
 #include <nccl_net.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <limits.h>
 #include <unistd.h>
 #include <ucp/api/ucp.h>
@@ -32,7 +33,7 @@
 
 ncclDebugLogger_t ucx_log_function = NULL;
 static const ucp_tag_t tag  = 0xABADBABE;
-static const ucp_tag_t tag_mask = 0; //recieve any message
+static const ucp_tag_t tag_mask = 0;//0xFFFFFFFFFFFFFFFF; //recieve any message
 
 ucp_context_h ucp_context;
 ucp_worker_h ucp_worker;
@@ -106,12 +107,6 @@ __hidden ncclResult_t ucx_init(ncclDebugLogger_t logFunction) {
   ucp_params_t ucp_params;
   ucp_config_t *config;
 
-  int debug = 0;
-  while(debug)
-    {
-      debug =1;
-    }
-
   ucx_log_function = logFunction;
   UCXCHECK(ucp_config_read(NULL, NULL, &config));
   memset(&ucp_params, 0, sizeof(ucp_params));
@@ -122,10 +117,9 @@ __hidden ncclResult_t ucx_init(ncclDebugLogger_t logFunction) {
   ucp_params.request_size = sizeof(struct ucx_request);
   ucp_params.request_init = request_init;
   UCXCHECK(ucp_init(&ucp_params, config, &ucp_context));
-  ucp_worker = NULL;
+  ucp_worker = (ucp_worker_h)(uintptr_t)UCP_WORKER_NONE;
   ucp_config_release(config);
   pthread_mutex_init(&worker_mutex, NULL);
-  //  fprintf(stderr, "ucx_init\n");
   return ncclSuccess;
 }
 
@@ -146,6 +140,7 @@ __hidden ncclResult_t ucx_pci_path(int dev, char** path) {
 
 __hidden ncclResult_t ucx_ptr_support(int dev, int* supported_types) {
   *supported_types = (NCCL_PTR_HOST | NCCL_PTR_CUDA);
+  //  *supported_types = NCCL_PTR_HOST;
   return ncclSuccess;
 }
 
@@ -154,7 +149,7 @@ __hidden ncclResult_t ucx_listen(int dev, void* handle, void** listen_comm) {
   ucx_listen_handle *my_handle;
   ucp_address_t *my_addr;
 
-  pthread_mutex_lock(&worker_mutex);
+  //  pthread_mutex_lock(&worker_mutex);
   //  NCCL_UCX_INFO(NCCL_NET, "ucx_listen");
   my_handle = (ucx_listen_handle*)handle;
   memset(&worker_params, 0, sizeof(worker_params));
@@ -164,7 +159,7 @@ __hidden ncclResult_t ucx_listen(int dev, void* handle, void** listen_comm) {
   UCXCHECK(ucp_worker_get_address(ucp_worker, &(my_addr), &(my_handle->local_addr_len)));
   memcpy(my_handle+1, my_addr, my_handle->local_addr_len);
   my_handle->hostid = gethostid();
-  //  NCCL_UCX_INFO(NCCL_NET,"[0x%x][hostid: %lu] local address length: %lu\n", (unsigned int)pthread_self(), my_handle->hostid, my_handle->local_addr_len);
+  NCCL_UCX_INFO(NCCL_NET,"[hostid: %lu] local address length: %lu\n", my_handle->hostid, my_handle->local_addr_len);
   *listen_comm = (void*)ucp_worker;
   ucp_worker_release_address(ucp_worker, my_addr);
   
@@ -202,7 +197,7 @@ __hidden ncclResult_t ucx_connect(int dev, void* handle, void** send_comm) {
 
   //check if ucp worker exists. The condition can be true iff
   //current process is the root of the tree 
-  if (ucp_worker == UCP_WORKER_NONE) {
+  if (ucp_worker == (ucp_worker_h)(uintptr_t)UCP_WORKER_NONE) {
     ucp_worker_params_t worker_params;
     
     memset(&worker_params, 0, sizeof(worker_params));
@@ -229,8 +224,8 @@ __hidden ncclResult_t ucx_connect(int dev, void* handle, void** send_comm) {
   comm->worker = ucp_worker;
   comm->ep     = ep;
   *send_comm   = comm;
-  ucp_worker = UCP_WORKER_NONE;
-  pthread_mutex_unlock(&worker_mutex);
+  ucp_worker = (ucp_worker_h)(uintptr_t)UCP_WORKER_NONE;
+  //pthread_mutex_unlock(&worker_mutex);
   return ncclSuccess;
 }
 
@@ -281,17 +276,17 @@ __hidden ncclResult_t ucx_accept(void* listen_comm, void** recv_comm) {
 __hidden ncclResult_t ucx_regmr(void* comm, void* data, int size, int type, void** mhandle){
   ucp_mem_map_params_t mmap_params;
   mmap_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
-                           UCP_MEM_MAP_PARAM_FIELD_LENGTH  |
-                           UCP_MEM_MAP_PARAM_FIELD_FLAGS;
-  mmap_params.address    = (uint64_t)data;
+    UCP_MEM_MAP_PARAM_FIELD_LENGTH;
+    //                           UCP_MEM_MAP_PARAM_FIELD_FLAGS;
+  mmap_params.address    = (void*)(uint64_t)data;
   mmap_params.length     = size;
   mmap_params.flags      = UCP_MEM_MAP_FIXED;
-  ucp_mem_map(ucp_context, &mmap_params, mhandle);
+  //  ucp_mem_map(ucp_context, &mmap_params, mhandle);
   return ncclSuccess;
 }
 
 __hidden ncclResult_t ucx_deregmr(void* comm, void* mhandle){
-  ucp_mem_unmap(ucp_context, mhandle);
+  //  ucp_mem_unmap(ucp_context, mhandle);
   return ncclSuccess;
 }
 
@@ -300,12 +295,12 @@ __hidden ncclResult_t ucx_isend(void* send_comm, void* data, int size, void* mha
   ucx_send_comm *comm;
 
   comm = (ucx_send_comm*) send_comm;
+
 #if SEND_TYPE == TAG_SEND
   req = ucp_tag_send_nb(comm->ep, data, size, ucp_dt_make_contig(1), tag, send_handler);
 #elif SEND_TYPE == STREAM_SEND
   req = ucp_stream_send_nb(comm->ep, data, size, ucp_dt_make_contig(1), send_handler, 0);
 #endif
-  
   if (UCS_PTR_IS_ERR(req)) {
     NCCL_UCX_WARN("ucx_isend: unable to send UCX address message\n");
     return ncclSystemError;
@@ -319,6 +314,7 @@ __hidden ncclResult_t ucx_isend(void* send_comm, void* data, int size, void* mha
       req->release = 1;
       req->worker = comm->worker;
   }
+  
   req->type = 0;
   req->size = size;
   *request = req;
@@ -352,7 +348,7 @@ __hidden ncclResult_t ucx_irecv(void* recv_comm, void* data, int size, void* mha
   else {
     req->release = 1;
     req->worker = ucp_worker;
-  }  
+  }
   req->type = 1;
   req->size = size;
   *request = req;
@@ -360,15 +356,31 @@ __hidden ncclResult_t ucx_irecv(void* recv_comm, void* data, int size, void* mha
 }
 
 __hidden ncclResult_t ucx_flush(void* recv_comm, void* data, int size, void* mhandle) {
+  ucp_worker_h ucp_worker;
+  
+  #if SEND_TYPE == TAG_SEND
+  ucp_worker = (ucp_worker_h)recv_comm;
+  #elif SEND_TYPE == STREAM_SEND
+  ucx_recv_comm *comm;
+  ucp_worker = comm->worker;
+  #endif
+
+  ucx_request *req;
+  req = ucp_worker_flush_nb(ucp_worker, 0, send_handler);
+  if (UCS_PTR_IS_ERR(req)) {
+    fprintf(stderr, "Error executing ucp_worker_flush operation\n");
+  } else if (UCS_PTR_STATUS(req) != UCS_OK) {
+    wait(ucp_worker, req);
+    req->completed = 0; req->release = 0;
+    ucp_request_release(req);
+  }
   return ncclSuccess;
 }
 
 __hidden ncclResult_t ucx_test(void* request, int* done, int* size) {
   ucx_request *req = (ucx_request*)request;
   *done = 0;
-  int debug = 0;
-  while(debug)
-    debug = 1;
+
   if(size) *size = 0;
   if (req->completed == 1){
     *done = 1;
@@ -388,20 +400,39 @@ __hidden ncclResult_t ucx_test(void* request, int* done, int* size) {
 
 __hidden ncclResult_t ucx_close_send(void* send_comm) {
   ucx_send_comm *comm;
-
-  comm = (ucx_send_comm*) send_comm;
-  ucp_ep_destroy(comm->ep);
-  ucp_worker_destroy(comm->worker);
+  void *close_req;
+  ucs_status_t status;
   
-  //  ucp_cleanup(ucp_context);
+  comm = (ucx_send_comm*) send_comm;
+  close_req = ucp_ep_close_nb(comm->ep, UCP_EP_CLOSE_MODE_FLUSH);
+  if (UCS_PTR_IS_PTR(close_req)){
+    do{
+      ucp_worker_progress(comm->worker);
+      status = ucp_request_check_status(close_req);
+    }while(status == UCS_INPROGRESS);
+    ucp_request_free(close_req);
+  } else if (UCS_PTR_STATUS(close_req) != UCS_OK){
+    NCCL_UCX_WARN("Failed to close UCX endpoint");
+  }
+  
+  //ucp_ep_destroy(comm->ep);
+  ucp_worker_destroy(comm->worker);
+  comm->worker = NULL;
+  //ucp_cleanup(ucp_context);
   return ncclSuccess;
 }
 
 __hidden ncclResult_t ucx_close_recv(void* recv_comm) {
   ucp_worker_h ucp_worker;
-
-  //  ucp_worker  = (ucp_worker_h) recv_comm;
-  //  ucp_worker_destroy(ucp_worker);
+  #if SEND_TYPE == TAG_SEND
+  ucp_worker  = (ucp_worker_h) recv_comm;
+  #elif SEND_TYPE == STREAM_SEND
+  ucp_worker = ((ucx_recv_comm*)recv_comm)->worker;
+  #endif
+  if (ucp_worker){
+    ucp_worker_destroy(ucp_worker);
+  }
+  ucp_cleanup(ucp_context);
   return ncclSuccess;
 }
 
