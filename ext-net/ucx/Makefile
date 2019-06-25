@@ -14,7 +14,7 @@ UCX_HOME ?= /opt/ucx
 INC:= -I$(NCCL_HOME)/include -I$(CUDA_HOME)/include -I$(UCX_HOME)/include -Iinclude/
 CFLAGS:=-fPIC $(INC) -std=c99 -D_GNU_SOURCE -g -O0
 PLUGIN_SO:=$(BUILDDIR)/lib/libnccl-net.so
-FILES:=nccl_ucx.c utils.c
+FILES:=nccl_ucx.c utils.c ibvwrap.c
 OBJS:=$(FILES:%.c=$(BUILDDIR)/obj/%.o)
 TEST:=$(BUILDDIR)/bin/test
 
@@ -24,7 +24,7 @@ $(BUILDDIR)/obj/%.o: %.c
 
 $(PLUGIN_SO): $(OBJS)
 	mkdir -p $(BUILDDIR)/lib
-	$(CC) -shared -o $@ -Wl,-soname,$(PLUGIN_SO) $(OBJS) -L$(CUDA_HOME)/lib64 -lcudart -L$(UCX_HOME)/lib -lucp -luct -lucs -lucm
+	$(CC) -shared -o $@ -Wl,-soname,$(PLUGIN_SO) $(OBJS) -libverbs -L$(CUDA_HOME)/lib64 -lcudart -L$(UCX_HOME)/lib -lucp -luct -lucs -lucm
 
 build: $(PLUGIN_SO)
 test:  $(TEST)
