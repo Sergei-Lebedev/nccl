@@ -75,10 +75,7 @@ struct ucx_listen_comm{
 typedef struct ucx_listen_comm ucx_listen_comm;
 
 struct ucx_request {
-  int size;
   int completed;
-  int release;
-  int type;
   ucp_worker_h worker;
 };
 typedef struct ucx_request ucx_request;
@@ -106,7 +103,6 @@ static void request_init(void *request){
 static void send_handler(void *request, ucs_status_t status){
     struct ucx_request *req = (struct ucx_request *) request;
     req->completed = 1;
-    req->release =  1;
     //   printf("[0x%x] send handler called with status %d (%s)\n", (unsigned int)pthread_self(), status, ucs_status_string(status));
 }
 
@@ -120,7 +116,6 @@ static void recv_handler(void *request, ucs_status_t status,
                         ucp_tag_recv_info_t *info){
     struct ucx_request *req = (struct ucx_request *) request;
     req->completed = 1;
-    req->release = 1;
     //printf("[0x%x] receive handler called with status %d (%s), length %lu\n", (unsigned int)pthread_self(), status, ucs_status_string(status), info->length);
 }
 
@@ -257,8 +252,8 @@ static ncclResult_t ucx_init_context(ucp_context_h *ctx, int dev){
     
   memset(&ucp_params, 0, sizeof(ucp_params));
   ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES |
-    UCP_PARAM_FIELD_REQUEST_SIZE |
-    UCP_PARAM_FIELD_REQUEST_INIT;
+                          UCP_PARAM_FIELD_REQUEST_SIZE |
+                          UCP_PARAM_FIELD_REQUEST_INIT;
   ucp_params.features = UCP_FEATURE_TAG;
   ucp_params.request_size = sizeof(struct ucx_request);
   ucp_params.request_init = request_init;
@@ -359,22 +354,25 @@ __hidden ncclResult_t ucx_accept(void* listen_comm, void** recv_comm) {
   return ncclSuccess;
 }
 
+
 __hidden ncclResult_t ucx_regmr(void* comm, void* data, int size, int type, void** mhandle){
   ucp_mem_map_params_t mmap_params;
   ucp_context_h *ctx = (ucp_context_h*)comm;
+
+  
   mmap_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
     UCP_MEM_MAP_PARAM_FIELD_LENGTH;
     //                           UCP_MEM_MAP_PARAM_FIELD_FLAGS;
   mmap_params.address    = (void*)(uint64_t)data;
   mmap_params.length     = size;
-  mmap_params.flags      = UCP_MEM_MAP_FIXED;
-  //  ucp_mem_map(*ctx, &mmap_params, (ucp_mem_h*)mhandle);
+  //      _params.flags      = UCP_MEM_MAP_FIXED;
+  ucp_mem_map(*ctx, &mmap_params, (ucp_mem_h*)mhandle);
   return ncclSuccess;
 }
 
 __hidden ncclResult_t ucx_deregmr(void* comm, void* mhandle){
   ucp_context_h *ctx = (ucp_context_h*)comm;
-  //  ucp_mem_unmap(*ctx, mhandle);
+  ucp_mem_unmap(*ctx, mhandle);
   return ncclSuccess;
 }
 
@@ -383,23 +381,17 @@ __hidden ncclResult_t ucx_isend(void* send_comm, void* data, int size, void* mha
   ucx_send_comm *comm;
 
   comm = (ucx_send_comm*) send_comm;
-
+  //  NCCL_UCX_WARN("send size %d", size);
   req = ucp_tag_send_nb(comm->ep, data, size, ucp_dt_make_contig(1), tag, send_handler);
   if (UCS_PTR_IS_ERR(req)) {
     NCCL_UCX_WARN("ucx_isend: unable to send UCX address message\n");
     return ncclSystemError;
   }
-  else if (UCS_PTR_STATUS(req) == UCS_OK){
-    req = (ucx_request *)malloc(sizeof(ucx_request));
-    req->completed = 1;
-    req->release = 0;
-  }
-  else {
-      req->release = 1;
-      req->worker = comm->worker;
+  else if (UCS_PTR_STATUS(req) != UCS_OK){
+    ucp_worker_progress(comm->worker);
+    req->worker = comm->worker;
   }  
-  req->type = 0;
-  *request = req;
+  *request = req ? req : 1;
   return ncclSuccess;
 }
 
@@ -410,26 +402,20 @@ __hidden ncclResult_t ucx_irecv(void* recv_comm, void* data, int size, void* mha
 
   ucp_worker = comm->worker;
   req = ucp_tag_recv_nb(ucp_worker, data, size, ucp_dt_make_contig(1), tag, tag_mask, recv_handler);
-
   if (UCS_PTR_IS_ERR(req)) {
     NCCL_UCX_WARN("ucx_irecv: unable to receive UCX address message (%s)",
             ucs_status_string(UCS_PTR_STATUS(req)));
     return ncclSystemError;
-  }else if (UCS_PTR_STATUS(req) == UCS_OK){
-    req = (ucx_request *)malloc(sizeof(ucx_request));
-    req->completed = 1;
-    req->release = 0;
-  }
-  else {
-    req->release = 1;
+  }else if (UCS_PTR_STATUS(req) != UCS_OK){
+    ucp_worker_progress(comm->worker);
     req->worker = ucp_worker;
   }
-  req->type = 1;
-  *request = req;
+  *request = req ? req : 1;
   return ncclSuccess;
 }
 
 __hidden ncclResult_t ucx_flush(void* recv_comm, void* data, int size, void* mhandle) {
+  #if 0
   ucp_worker_h ucp_worker;
   ucx_recv_comm *comm = (ucx_recv_comm*)recv_comm;
   ucp_worker = comm->worker;
@@ -439,9 +425,10 @@ __hidden ncclResult_t ucx_flush(void* recv_comm, void* data, int size, void* mha
     NCCL_UCX_WARN("Error executing ucp_worker_flush operation");
   } else if (UCS_PTR_STATUS(req) != UCS_OK) {
     worker_wait(ucp_worker, req);
-    req->completed = 0; req->release = 0;
+    req->completed = 0;
     ucp_request_release(req);
   }
+  #endif
   return ncclSuccess;
 }
 
@@ -451,18 +438,14 @@ __hidden ncclResult_t ucx_test(void* request, int* done, int* size) {
 
   // we don't set size cause we don't use it later in ucx_flush
   //  if(size) *size = 0;
+  if (UCS_PTR_STATUS(request) == 1){
+    *done = 1;
+    return ncclSuccess;
+  }
   if (req->completed == 1){
     *done = 1;
-    //    if (size) *size = req->size;
-    if (req->release){
-      //      req->size = 0;
-      req->completed = 0;
-      req->release = 0;
-      ucp_request_release(req);
-    }
-    else{
-      free(req);
-    }
+    req->completed = 0;
+    ucp_request_release(req);
   } else {
     ucp_worker_progress(req->worker);
   }
@@ -474,8 +457,7 @@ __hidden ncclResult_t ucx_close_send(void* send_comm) {
     ucx_send_comm *comm;
     void *close_req;
     ucs_status_t status;
-  
-    comm = (ucx_send_comm*) send_comm;
+     comm = (ucx_send_comm*) send_comm;
     close_req = ucp_ep_close_nb(comm->ep, UCP_EP_CLOSE_MODE_FLUSH);
     if (UCS_PTR_IS_PTR(close_req)){
       do{
@@ -489,6 +471,8 @@ __hidden ncclResult_t ucx_close_send(void* send_comm) {
   
     ucp_worker_destroy(comm->worker);
     ucp_cleanup(comm->ctx);
+    int done = 1;
+    socketSend(comm->fd, &done, sizeof(int));
     close(comm->fd);
     free(comm);
   }
@@ -499,6 +483,8 @@ __hidden ncclResult_t ucx_close_recv(void* recv_comm) {
   if (recv_comm){
     ucp_worker_h ucp_worker;
     ucx_recv_comm *comm = (ucx_recv_comm*)recv_comm;
+    int peer_close_send;
+    socketReceive(comm->fd, &peer_close_send, sizeof(int));
     ucp_worker = comm->worker;
     ucp_worker_destroy(ucp_worker);
     ucp_cleanup(comm->ctx);
