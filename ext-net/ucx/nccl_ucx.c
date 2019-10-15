@@ -231,7 +231,7 @@ __hidden ncclResult_t ucx_pci_path(int dev, char** path) {
 
 __hidden ncclResult_t ucx_ptr_support(int dev, int* supported_types) {
   *supported_types = (NCCL_PTR_HOST | NCCL_PTR_CUDA);
-  //  *supported_types = NCCL_PTR_HOST;
+  //*supported_types = NCCL_PTR_HOST;
   return ncclSuccess;
 }
 
@@ -405,7 +405,7 @@ __hidden ncclResult_t ucx_isend(void* send_comm, void* data, int size, void* mha
     NCCL_UCX_WARN("ucx_isend: unable to send message\n");
     return ncclSystemError;
   }
-  else if (UCS_PTR_STATUS(req) != UCS_OK){
+  else if (req!= NULL){
     ucp_worker_progress(comm->worker);
     req->worker = comm->worker;
   }  
@@ -427,7 +427,7 @@ __hidden ncclResult_t ucx_irecv(void* recv_comm, void* data, int size, void* mha
     NCCL_UCX_WARN("ucx_irecv: unable to receive message (%s)",
             ucs_status_string(UCS_PTR_STATUS(req)));
     return ncclSystemError;
-  }else if (UCS_PTR_STATUS(req) != UCS_OK){
+  }else if (req != NULL){
     ucp_worker_progress(comm->worker);
     req->worker = ucp_worker;
   }
@@ -445,7 +445,7 @@ __hidden ncclResult_t ucx_test(void* request, int* done, int* size) {
 
   // we don't set size cause we don't use it later in ucx_flush
   //  if(size) *size = 0;
-  if (UCS_PTR_STATUS(request) == 1){
+  if (request == 1){
     *done = 1;
     return ncclSuccess;
   }
@@ -473,7 +473,7 @@ __hidden ncclResult_t ucx_close_send(void* send_comm) {
           status = ucp_request_check_status(close_req);
         }while(status == UCS_INPROGRESS);
         ucp_request_free(close_req);
-      } else if (UCS_PTR_STATUS(close_req) != UCS_OK){
+      } else if (close_req != NULL){
         NCCL_UCX_WARN("Failed to close UCX endpoint");
       }
     }
