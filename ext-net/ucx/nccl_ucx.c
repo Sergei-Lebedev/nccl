@@ -302,7 +302,6 @@ __hidden ncclResult_t ucx_connect(int dev, void* handle, void** send_comm) {
 }
 
 __hidden ncclResult_t ucx_accept(void* listen_comm, void** recv_comm) {
-  //  NCCL_UCX_INFO(NCCL_NET, "ucx_accept");
   ucx_recv_comm *r_comm = (ucx_recv_comm*)malloc(sizeof(ucx_recv_comm));
   ucx_listen_comm *l_comm = (ucx_listen_comm*)listen_comm;
 
@@ -420,7 +419,6 @@ __hidden ncclResult_t ucx_irecv(void* recv_comm, void* data, int size, void* mha
 
   if (comm->ready == 0){ ucx_recv_check(comm);}
   if (comm->ready == 0) { *request = NULL; return ncclSuccess;}
-  
   ucp_worker = comm->worker;
   req = ucp_tag_recv_nb(ucp_worker, data, size, ucp_dt_make_contig(1), tag, tag_mask, recv_handler);
   if (UCS_PTR_IS_ERR(req)) {

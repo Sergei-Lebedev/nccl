@@ -53,8 +53,8 @@ static ncclResult_t ncclNetPtrSupport(int dev, int* supportedTypes) {
     *supportedTypes |= NCCL_PTR_CUDA;
 cleanup:
     if (gpuPtr) cudaFree(gpuPtr);
-    if (rComm) ncclNetCloseRecv(rComm);
     if (sComm) ncclNetCloseSend(sComm);
+    if (rComm) ncclNetCloseRecv(rComm);
     if (lComm) ncclNetCloseListen(lComm);
   }
   return ncclSuccess;
