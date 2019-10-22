@@ -75,17 +75,22 @@ ncclResult_t ucx_ptr_support(int dev, int* supported_types) {
   return ncclSuccess;
 }
 
+#define REG_ALIGN (4096)
 ncclResult_t ucx_regmr(void* comm, void* data, int size, int type, void** mhandle){
   ucp_mem_map_params_t mmap_params;
   ucp_context_h *ctx = (ucp_context_h*)comm;
 
-  
+  uint64_t addr = (uint64_t)data;
+  uint64_t reg_addr = addr & (~(REG_ALIGN-1));
+  uint64_t reg_size = addr+size - reg_addr;
+  reg_size = ((reg_size + REG_ALIGN-1) / REG_ALIGN ) * REG_ALIGN;
+
   mmap_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
-    UCP_MEM_MAP_PARAM_FIELD_LENGTH;
-    //                           UCP_MEM_MAP_PARAM_FIELD_FLAGS;
-  mmap_params.address    = (void*)(uint64_t)data;
-  mmap_params.length     = size;
-  //      _params.flags      = UCP_MEM_MAP_FIXED;
+                           UCP_MEM_MAP_PARAM_FIELD_LENGTH;
+                           UCP_MEM_MAP_PARAM_FIELD_FLAGS;
+  mmap_params.address    = (void*)reg_addr;
+  mmap_params.length     = reg_size;
+  mmap_params.flags      = UCP_MEM_MAP_FIXED;
   ucp_mem_map(*ctx, &mmap_params, (ucp_mem_h*)mhandle);
   return ncclSuccess;
 }
