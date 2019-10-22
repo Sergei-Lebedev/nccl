@@ -1,6 +1,8 @@
-/*
- * Copyright (C) Mellanox Technologies Ltd. 2001-2019.  ALL RIGHTS RESERVED.
- */
+/*************************************************************************
+ * Copyright (C) Mellanox Technologies Ltd. 2019.  ALL RIGHTS RESERVED.
+ *
+ * See LICENSE.txt for license information
+ ************************************************************************/
 
 #ifndef NCCL_UCX_LOG_H_
 #define NCCL_UCX_LOG_H_
