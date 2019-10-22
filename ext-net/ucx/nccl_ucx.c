@@ -13,30 +13,14 @@
 #include "core.h"
 #include "socket.h"
 #include "ibvwrap.h"
+#include "nccl_ucx.h"
+
 
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include <limits.h>
 #include <unistd.h>
-#include <ucp/api/ucp.h>
-#include <nccl_ucx_log.h>
-
-#define __hidden __attribute__ ((visibility("hidden")))
-
-#define UCXCHECK(cmd) do {                               \
-  int e = cmd;                                           \
-  if( UCS_OK != e ) {                                    \
-    NCCL_UCX_WARN("Failed: UCX error %s:%d '%d' %s\n",   \
-        __FILE__,__LINE__, e, ucs_status_string(e));     \
-    return ncclInternalError;                            \
-  }                                                      \
-} while(0)
-
-
-ncclDebugLogger_t ucx_log_function = NULL;
-static const ucp_tag_t tag  = 0xABADBABE;
-static const ucp_tag_t tag_mask = 0;//0xFFFFFFFFFFFFFFFF; //recieve any message
 
 #define MAXNAMESIZE 64
 struct ncclIbDev {
@@ -47,14 +31,12 @@ struct ncclIbDev {
   char devName[MAXNAMESIZE];
 };
 
-#define MAX_IB_PORT 15
 struct userIbDev {
   char devName[MAXNAMESIZE];
   uint16_t port_en;
 };
 
 #define MAX_IB_DEVS 16
-
 struct ncclIbDev ncclIbDevs[MAX_IB_DEVS];
 struct userIbDev userIbDevs[MAX_IB_DEVS];
 
@@ -130,8 +112,7 @@ static ncclResult_t get_socket_addr(union socketAddress* addr) {
   return ncclSuccess;
 }
 
-__hidden ncclResult_t ucx_init(ncclDebugLogger_t logFunction) {
-
+ncclResult_t ucx_init(ncclDebugLogger_t logFunction) {
   ucx_log_function = logFunction;
   if (ncclNIbDevs == -1) {
     pthread_mutex_lock(&ncclIbLock);
@@ -213,12 +194,12 @@ __hidden ncclResult_t ucx_init(ncclDebugLogger_t logFunction) {
   return ncclSuccess;
 }
 
-__hidden ncclResult_t ucx_devices(int* ndev) {
+ncclResult_t ucx_devices(int* ndev) {
   *ndev = ncclNIbDevs;
   return ncclSuccess;
 }
 
-__hidden ncclResult_t ucx_pci_path(int dev, char** path) {
+ncclResult_t ucx_pci_path(int dev, char** path) {
   char devicepath[PATH_MAX];
   snprintf(devicepath, PATH_MAX, "/sys/class/infiniband/%s/device", ncclIbDevs[dev].devName);
   *path = realpath(devicepath, NULL);
@@ -229,7 +210,7 @@ __hidden ncclResult_t ucx_pci_path(int dev, char** path) {
   return ncclSuccess;
 }
 
-__hidden ncclResult_t ucx_ptr_support(int dev, int* supported_types) {
+ncclResult_t ucx_ptr_support(int dev, int* supported_types) {
   *supported_types = (NCCL_PTR_HOST | NCCL_PTR_CUDA);
   //*supported_types = NCCL_PTR_HOST;
   return ncclSuccess;
@@ -260,7 +241,7 @@ static ncclResult_t ucx_init_context(ucp_context_h *ctx, int dev){
   ucp_config_release(config);
 }
 
-__hidden ncclResult_t ucx_listen(int dev, void* handle, void** listen_comm) {
+ncclResult_t ucx_listen(int dev, void* handle, void** listen_comm) {
   ucx_listen_handle *my_handle;
   ucx_listen_comm *comm;
 
@@ -280,7 +261,7 @@ __hidden ncclResult_t ucx_listen(int dev, void* handle, void** listen_comm) {
   return ncclSuccess;
 }
 
-__hidden ncclResult_t ucx_connect(int dev, void* handle, void** send_comm) {
+ncclResult_t ucx_connect(int dev, void* handle, void** send_comm) {
   ucp_worker_params_t worker_params;
 
   ucx_listen_handle *recv_handle = (ucx_listen_handle*)handle;
@@ -301,7 +282,7 @@ __hidden ncclResult_t ucx_connect(int dev, void* handle, void** send_comm) {
   return ncclSuccess;
 }
 
-__hidden ncclResult_t ucx_accept(void* listen_comm, void** recv_comm) {
+ncclResult_t ucx_accept(void* listen_comm, void** recv_comm) {
   //  NCCL_UCX_INFO(NCCL_NET, "ucx_accept");
   ucx_recv_comm *r_comm = (ucx_recv_comm*)malloc(sizeof(ucx_recv_comm));
   ucx_listen_comm *l_comm = (ucx_listen_comm*)listen_comm;
@@ -374,7 +355,7 @@ ncclResult_t ucx_recv_check(ucx_recv_comm *comm){
   return ncclSuccess;
 }
 
-__hidden ncclResult_t ucx_regmr(void* comm, void* data, int size, int type, void** mhandle){
+ncclResult_t ucx_regmr(void* comm, void* data, int size, int type, void** mhandle){
   ucp_mem_map_params_t mmap_params;
   ucp_context_h *ctx = (ucp_context_h*)comm;
 
@@ -389,13 +370,13 @@ __hidden ncclResult_t ucx_regmr(void* comm, void* data, int size, int type, void
   return ncclSuccess;
 }
 
-__hidden ncclResult_t ucx_deregmr(void* comm, void* mhandle){
+ncclResult_t ucx_deregmr(void* comm, void* mhandle){
   ucp_context_h *ctx = (ucp_context_h*)comm;
   ucp_mem_unmap(*ctx, mhandle);
   return ncclSuccess;
 }
 
-__hidden ncclResult_t ucx_isend(void* send_comm, void* data, int size, void* mhandle, void** request) {
+ncclResult_t ucx_isend(void* send_comm, void* data, int size, void* mhandle, void** request) {
   ucx_request *req;
   ucx_send_comm *comm = (ucx_send_comm*) send_comm;
   if (comm->ready == 0){ ucx_send_check(comm);}
@@ -413,7 +394,7 @@ __hidden ncclResult_t ucx_isend(void* send_comm, void* data, int size, void* mha
   return ncclSuccess;
 }
 
-__hidden ncclResult_t ucx_irecv(void* recv_comm, void* data, int size, void* mhandle, void** request) {
+ncclResult_t ucx_irecv(void* recv_comm, void* data, int size, void* mhandle, void** request) {
   ucx_request *req;
   ucp_worker_h ucp_worker;
   ucx_recv_comm *comm = (ucx_recv_comm*) recv_comm;
@@ -435,11 +416,11 @@ __hidden ncclResult_t ucx_irecv(void* recv_comm, void* data, int size, void* mha
   return ncclSuccess;
 }
 
-__hidden ncclResult_t ucx_flush(void* recv_comm, void* data, int size, void* mhandle) {
+ncclResult_t ucx_flush(void* recv_comm, void* data, int size, void* mhandle) {
   return ncclSuccess;
 }
 
-__hidden ncclResult_t ucx_test(void* request, int* done, int* size) {
+ncclResult_t ucx_test(void* request, int* done, int* size) {
   ucx_request *req = (ucx_request*)request;
   *done = 0;
 
@@ -459,7 +440,7 @@ __hidden ncclResult_t ucx_test(void* request, int* done, int* size) {
   return ncclSuccess;
 }
 
-__hidden ncclResult_t ucx_close_send(void* send_comm) {
+ncclResult_t ucx_close_send(void* send_comm) {
   if (send_comm){
     ucx_send_comm *comm;
     void *close_req;
@@ -487,7 +468,7 @@ __hidden ncclResult_t ucx_close_send(void* send_comm) {
   return ncclSuccess;
 }
 
-__hidden ncclResult_t ucx_close_recv(void* recv_comm) {
+ncclResult_t ucx_close_recv(void* recv_comm) {
   if (recv_comm){
     ucp_worker_h ucp_worker;
     ucx_recv_comm *comm = (ucx_recv_comm*)recv_comm;
@@ -502,7 +483,7 @@ __hidden ncclResult_t ucx_close_recv(void* recv_comm) {
   return ncclSuccess;
 }
 
-__hidden ncclResult_t ucx_close_listen(void* listen_comm) {
+ncclResult_t ucx_close_listen(void* listen_comm) {
   ucx_listen_comm *comm = (ucx_listen_comm*)listen_comm;
   if (comm){
     close(comm->fd);
