@@ -1,0 +1,103 @@
+/*************************************************************************
+ * Copyright (C) Mellanox Technologies Ltd. 2019.  ALL RIGHTS RESERVED.
+ *
+ * See LICENSE.txt for license information
+ ************************************************************************/
+
+#ifndef NCCL_UCX_H_
+#define NCCL_UCX_H_
+
+#include "nccl_ucx_log.h"
+#include "nccl.h"
+#include <ucp/api/ucp.h>
+#define UCXCHECK(cmd) do {                               \
+  int e = cmd;                                           \
+  if( UCS_OK != e ) {                                    \
+    NCCL_UCX_WARN("Failed: UCX error %s:%d '%d' %s\n",   \
+        __FILE__,__LINE__, e, ucs_status_string(e));     \
+    return ncclInternalError;                            \
+  }                                                      \
+} while(0)
+
+#define UCXCHECK_VOID(cmd) do {                               \
+  int e = cmd;                                           \
+  if( UCS_OK != e ) {                                    \
+    NCCL_UCX_WARN("Failed: UCX error %s:%d '%d' %s\n",   \
+        __FILE__,__LINE__, e, ucs_status_string(e));     \
+  }                                                      \
+} while(0)
+
+
+ncclDebugLogger_t ucx_log_function = NULL;
+static const ucp_tag_t tag  = 0xABADBABE;
+static const ucp_tag_t tag_mask = 0;//0xFFFFFFFFFFFFFFFF; //recieve any message
+
+static int ncclNIbDevs = -1;
+
+#define MAXNAMESIZE 64
+struct ncclIbDev {
+  int device;
+  uint8_t port;
+  uint8_t link;
+  struct ibv_context* context;
+  char devName[MAXNAMESIZE];
+  struct sockaddr_storage addr;
+};
+
+struct userIbDev {
+  char devName[MAXNAMESIZE];
+  uint16_t port_en;
+};
+
+#define MAX_IB_DEVS 16
+struct ncclIbDev ncclIbDevs[MAX_IB_DEVS];
+struct userIbDev userIbDevs[MAX_IB_DEVS];
+
+ncclResult_t ucx_devices(int* ndev) {
+  *ndev = ncclNIbDevs;
+  return ncclSuccess;
+}
+
+ncclResult_t ucx_pci_path(int dev, char** path) {
+  char devicepath[PATH_MAX];
+  snprintf(devicepath, PATH_MAX, "/sys/class/infiniband/%s/device", ncclIbDevs[dev].devName);
+  *path = realpath(devicepath, NULL);
+  if (*path == NULL) {
+    NCCL_UCX_WARN("Could not find real path of %s", devicepath);
+    return ncclSystemError;
+  }
+  return ncclSuccess;
+}
+
+ncclResult_t ucx_ptr_support(int dev, int* supported_types) {
+  *supported_types = (NCCL_PTR_HOST | NCCL_PTR_CUDA);
+  //*supported_types = NCCL_PTR_HOST;
+  return ncclSuccess;
+}
+
+ncclResult_t ucx_regmr(void* comm, void* data, int size, int type, void** mhandle){
+  ucp_mem_map_params_t mmap_params;
+  ucp_context_h *ctx = (ucp_context_h*)comm;
+
+  
+  mmap_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
+    UCP_MEM_MAP_PARAM_FIELD_LENGTH;
+    //                           UCP_MEM_MAP_PARAM_FIELD_FLAGS;
+  mmap_params.address    = (void*)(uint64_t)data;
+  mmap_params.length     = size;
+  //      _params.flags      = UCP_MEM_MAP_FIXED;
+  ucp_mem_map(*ctx, &mmap_params, (ucp_mem_h*)mhandle);
+  return ncclSuccess;
+}
+
+ncclResult_t ucx_deregmr(void* comm, void* mhandle){
+  ucp_context_h *ctx = (ucp_context_h*)comm;
+  ucp_mem_unmap(*ctx, mhandle);
+  return ncclSuccess;
+}
+
+ncclResult_t ucx_flush(void* recv_comm, void* data, int size, void* mhandle) {
+  return ncclSuccess;
+}
+
+#endif
