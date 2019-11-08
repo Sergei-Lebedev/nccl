@@ -26,14 +26,12 @@ pthread_mutex_t ncclIbLock = PTHREAD_MUTEX_INITIALIZER;
 
 struct ucx_listen_handle{
   union socketAddress connectAddr;
-  size_t local_addr_len;
 };
 typedef struct ucx_listen_handle ucx_listen_handle;
 
 struct ucx_listen_comm{
   int fd;
-  ucx_listen_handle handle;
-  ucp_context_h ctx;
+  int dev;
 };
 typedef struct ucx_listen_comm ucx_listen_comm;
 
@@ -43,12 +41,20 @@ struct ucx_request {
 };
 typedef struct ucx_request ucx_request;
 
+struct nccl_ucx_worker{
+  ucp_context_h ctx;
+  ucp_worker_h worker;
+  int count;
+};
+static struct nccl_ucx_worker workers[MAX_IB_DEVS];
+
 struct ucx_send_comm {
   ucp_context_h ctx;
   ucp_worker_h worker;
   ucp_ep_h ep;
   int fd;
   int ready;
+  ucp_tag_t tag;
 };
 typedef struct ucx_send_comm ucx_send_comm;
 
@@ -57,6 +63,7 @@ struct ucx_recv_comm {
   ucp_worker_h worker;
   int fd;
   int ready;
+  ucp_tag_t tag;
 };
 typedef struct ucx_recv_comm ucx_recv_comm;
 
@@ -77,13 +84,11 @@ static void failure_handler(void *arg, ucp_ep_h ep, ucs_status_t status){
     *arg_status = status;
 }
 
-static void recv_handler(void *request, ucs_status_t status,
-                        ucp_tag_recv_info_t *info){
+static void recv_handler(void *request, ucs_status_t status, ucp_tag_recv_info_t *info){
     struct ucx_request *req = (struct ucx_request *) request;
     req->completed = 1;
     //printf("[0x%x] receive handler called with status %d (%s), length %lu\n", (unsigned int)pthread_self(), status, ucs_status_string(status), info->length);
 }
-
 
 static union socketAddress nccl_ucx_if_addr;
 static char if_name[MAX_IF_NAME_SIZE];
@@ -92,6 +97,60 @@ static ncclResult_t get_socket_addr(union socketAddress* addr) {
   memcpy(addr, &nccl_ucx_if_addr, sizeof(*addr));
   return ncclSuccess;
 }
+
+static ncclResult_t ucx_init_context(ucp_context_h *ctx, int dev){
+  ucp_params_t ucp_params;
+  ucp_config_t *config;
+  
+  char ucx_prefix[PATH_MAX]; //DEV_####
+  char ucx_env_var[PATH_MAX]; //UCX_DEV_####_NET_DEVICES
+  char ucx_env_val[PATH_MAX]; //e.g. mlx5_0:1
+    
+  snprintf(ucx_prefix, PATH_MAX, "DEV_%d", dev);
+  snprintf(ucx_env_var, PATH_MAX, "UCX_%s_NET_DEVICES", ucx_prefix);
+  snprintf(ucx_env_val, PATH_MAX, "%s:%d" , ncclIbDevs[dev].devName, ncclIbDevs[dev].port);
+  setenv(ucx_env_var, ucx_env_val, 0);
+  UCXCHECK(ucp_config_read(ucx_prefix, NULL, &config));
+    
+  memset(&ucp_params, 0, sizeof(ucp_params));
+  ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES |
+                          UCP_PARAM_FIELD_REQUEST_SIZE |
+                          UCP_PARAM_FIELD_REQUEST_INIT;
+  ucp_params.features = UCP_FEATURE_TAG;
+  ucp_params.request_size = sizeof(struct ucx_request);
+  ucp_params.request_init = request_init;
+  UCXCHECK(ucp_init(&ucp_params, config, ctx));
+  ucp_config_release(config);
+}
+
+static ncclResult_t ucx_init_worker(ucp_context_h ctx, ucp_worker_h *worker){
+  ucp_worker_params_t worker_params;
+  memset(&worker_params, 0, sizeof(worker_params));
+  worker_params.field_mask  = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
+  worker_params.thread_mode = UCS_THREAD_MODE_SINGLE;
+  UCXCHECK(ucp_worker_create(ctx, &worker_params, worker));
+}
+
+static ncclResult_t ucx_get_ctx_and_worker(int dev, ucp_context_h *ctx, ucp_worker_h *worker, ucp_tag_t *newtag){
+  pthread_mutex_lock(&ncclIbLock);
+  if (ncclNIbDevs < dev){
+    NCCL_UCX_WARN("Device index is too large");
+    return ncclSystemError;
+  }
+  if (workers[dev].count == 0){
+    ucx_init_context(&workers[dev].ctx, dev);
+    ucx_init_worker(workers[dev].ctx, &workers[dev].worker);
+  }
+  *ctx = workers[dev].ctx;
+  *worker = workers[dev].worker;
+  if (newtag != NULL){
+    *newtag = tag + workers[dev].count;
+  }
+  workers[dev].count++;
+  pthread_mutex_unlock(&ncclIbLock);
+  return ncclSuccess;
+}
+
 
 ncclResult_t ucx_init(ncclDebugLogger_t logFunction) {
   ucx_log_function = logFunction;
@@ -149,6 +208,9 @@ ncclResult_t ucx_init(ncclDebugLogger_t logFunction) {
           ncclIbDevs[ncclNIbDevs].link = portAttr.link_layer;
           ncclIbDevs[ncclNIbDevs].context = context;
           strncpy(ncclIbDevs[ncclNIbDevs].devName, devices[d]->name, MAXNAMESIZE);
+          //ucx_init_context(&workers[ncclNIbDevs].ctx, ncclNIbDevs);
+          //ucx_init_worker(workers[ncclNIbDevs].ctx, &workers[ncclNIbDevs].worker);
+          workers[ncclNIbDevs].count=0;
           ncclNIbDevs++;
           found++;
           //pthread_create(&ncclIbAsyncThread, NULL, ncclIbAsyncThreadMain, context);
@@ -175,43 +237,17 @@ ncclResult_t ucx_init(ncclDebugLogger_t logFunction) {
   return ncclSuccess;
 }
 
-static ncclResult_t ucx_init_context(ucp_context_h *ctx, int dev){
-  ucp_params_t ucp_params;
-  ucp_config_t *config;
-  
-  char ucx_prefix[PATH_MAX]; //DEV_####
-  char ucx_env_var[PATH_MAX]; //UCX_DEV_####_NET_DEVICES
-  char ucx_env_val[PATH_MAX]; //e.g. mlx5_0:1
-    
-  snprintf(ucx_prefix, PATH_MAX, "DEV_%d", dev);
-  snprintf(ucx_env_var, PATH_MAX, "UCX_%s_NET_DEVICES", ucx_prefix);
-  snprintf(ucx_env_val, PATH_MAX, "%s:%d" , ncclIbDevs[dev].devName, ncclIbDevs[dev].port);
-  setenv(ucx_env_var, ucx_env_val, 0);
-  UCXCHECK(ucp_config_read(ucx_prefix, NULL, &config));
-    
-  memset(&ucp_params, 0, sizeof(ucp_params));
-  ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES |
-                          UCP_PARAM_FIELD_REQUEST_SIZE |
-                          UCP_PARAM_FIELD_REQUEST_INIT;
-  ucp_params.features = UCP_FEATURE_TAG;
-  ucp_params.request_size = sizeof(struct ucx_request);
-  ucp_params.request_init = request_init;
-  UCXCHECK(ucp_init(&ucp_params, config, ctx));
-  ucp_config_release(config);
-}
-
 ncclResult_t ucx_listen(int dev, void* handle, void** listen_comm) {
   ucx_listen_handle *my_handle;
   ucx_listen_comm *comm;
 
-  
   //allocate listen comm which contains ucp_worker and socket address to exchange
   comm = malloc(sizeof(ucx_listen_comm));
   memset(comm, 0, sizeof(ucx_listen_comm));
   
   static_assert(sizeof(ucx_listen_handle) < NCCL_NET_HANDLE_MAXSIZE, "ucx listen handle size too large");
   my_handle = (ucx_listen_handle*)handle;
-  ucx_init_context(&comm->ctx, dev);
+  comm->dev = dev;
   //TODO: add error checking
   get_socket_addr(&(my_handle->connectAddr));
   createListenSocket(&comm->fd, &my_handle->connectAddr);
@@ -228,13 +264,10 @@ ncclResult_t ucx_connect(int dev, void* handle, void** send_comm) {
 
   //TODO: add error checking
   connectAddress(&comm->fd, &recv_handle->connectAddr);
+  ucx_get_ctx_and_worker(dev, &comm->ctx, &comm->worker, NULL);
+  //ucx_init_context(&comm->ctx, dev);
+  //ucx_init_worker(comm->ctx, &comm->worker);
   
-  memset(&worker_params, 0, sizeof(worker_params));
-  worker_params.field_mask  = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
-  worker_params.thread_mode = UCS_THREAD_MODE_SINGLE;
-  ucx_init_context(&comm->ctx, dev);
-  UCXCHECK(ucp_worker_create(comm->ctx, &worker_params, &comm->worker));   
-
   comm->ready = 0;
   comm->ep    = NULL;
   *send_comm = comm;
@@ -242,7 +275,6 @@ ncclResult_t ucx_connect(int dev, void* handle, void** send_comm) {
 }
 
 ncclResult_t ucx_accept(void* listen_comm, void** recv_comm) {
-  //  NCCL_UCX_INFO(NCCL_NET, "ucx_accept");
   ucx_recv_comm *r_comm = (ucx_recv_comm*)malloc(sizeof(ucx_recv_comm));
   ucx_listen_comm *l_comm = (ucx_listen_comm*)listen_comm;
 
@@ -254,20 +286,17 @@ ncclResult_t ucx_accept(void* listen_comm, void** recv_comm) {
   // get worker address and send it to peer
   ucp_address_t *my_addr;
   size_t local_addr_len;
-  r_comm->ctx = l_comm->ctx;
 
-  //create ucp_worker
-  ucp_worker_params_t worker_params;
-  memset(&worker_params, 0, sizeof(worker_params));
-  worker_params.field_mask  = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
-  worker_params.thread_mode = UCS_THREAD_MODE_SINGLE;
-  UCXCHECK(ucp_worker_create(r_comm->ctx, &worker_params, &r_comm->worker));
-
+  ucx_get_ctx_and_worker(l_comm->dev, &r_comm->ctx, &r_comm->worker, &r_comm->tag);
+  //ucx_init_context(&r_comm->ctx, l_comm->dev);
+  //ucx_init_worker(r_comm->ctx, &r_comm->worker); r_comm->tag = tag;
   UCXCHECK(ucp_worker_get_address(r_comm->worker, &my_addr, &local_addr_len));
-  NCCL_UCX_INFO(NCCL_NET, "Worker address length: %zu", local_addr_len);
-  socketSend(r_comm->fd, &local_addr_len, sizeof(size_t));
-  socketSend(r_comm->fd, my_addr, local_addr_len);
+  NCCLCHECK(socketSend(r_comm->fd, &local_addr_len, sizeof(size_t)));
+  NCCLCHECK(socketSend(r_comm->fd, my_addr, local_addr_len));
+  NCCLCHECK(socketSend(r_comm->fd, &r_comm->tag, sizeof(ucp_tag_t)));
   ucp_worker_release_address(r_comm->worker, my_addr);
+  NCCL_UCX_INFO(NCCL_NET, "Worker address length: %zu", local_addr_len);
+
   *recv_comm = r_comm;
 
   return ncclSuccess;
@@ -280,14 +309,14 @@ ncclResult_t ucx_send_check(ucx_send_comm *comm){
   ucp_ep_h ep;
   ucp_ep_params_t ep_params;
 
-  socketProgress(NCCL_SOCKET_RECV, comm->fd, &peer_addr_len, sizeof(size_t), &bytes);
+  NCCLCHECK(socketProgress(NCCL_SOCKET_RECV, comm->fd, &peer_addr_len, sizeof(size_t), &bytes));
   if (bytes == 0){
     return ncclSuccess;
   }
-  socketWait(NCCL_SOCKET_RECV, comm->fd, &peer_addr_len, sizeof(size_t), &bytes);
+  NCCLCHECK(socketWait(NCCL_SOCKET_RECV, comm->fd, &peer_addr_len, sizeof(size_t), &bytes));
   peer_addr = malloc(peer_addr_len);
   bytes = 0;
-  socketWait(NCCL_SOCKET_RECV, comm->fd, peer_addr, peer_addr_len, &bytes);
+  NCCLCHECK(socketWait(NCCL_SOCKET_RECV, comm->fd, peer_addr, peer_addr_len, &bytes));
   
   ep_params.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;//|
   //                         UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE;
@@ -295,22 +324,22 @@ ncclResult_t ucx_send_check(ucx_send_comm *comm){
   //  ep_params.err_mode        = err_handling_opt.ucp_err_mode;
   //  NCCL_UCX_INFO(NCCL_NET, "Worker: %p", ucp_worker);
   UCXCHECK(ucp_ep_create(comm->worker, &ep_params, &ep));
-  
+  bytes = 0;
+  NCCLCHECK(socketWait(NCCL_SOCKET_RECV, comm->fd, &comm->tag, sizeof(ucp_tag_t), &bytes));
   comm->ep    = ep;
   comm->ready = 1;
   free(peer_addr);
-  socketSend(comm->fd, &comm->ready, sizeof(int));
-
+  NCCLCHECK(socketSend(comm->fd, &comm->ready, sizeof(int)));
   return ncclSuccess;
 }
 
 ncclResult_t ucx_recv_check(ucx_recv_comm *comm){
   int bytes = 0;
-  socketProgress(NCCL_SOCKET_RECV, comm->fd, &comm->ready, sizeof(int), &bytes);
+  NCCLCHECK(socketProgress(NCCL_SOCKET_RECV, comm->fd, &comm->ready, sizeof(int), &bytes));
   if (bytes == 0){
     return ncclSuccess;
   }
-  socketWait(NCCL_SOCKET_RECV, comm->fd, &comm->ready, sizeof(int), &bytes);
+  NCCLCHECK(socketWait(NCCL_SOCKET_RECV, comm->fd, &comm->ready, sizeof(int), &bytes));
   return ncclSuccess;
 }
 
@@ -319,9 +348,10 @@ ncclResult_t ucx_isend(void* send_comm, void* data, int size, void* mhandle, voi
   ucx_send_comm *comm = (ucx_send_comm*) send_comm;
   if (comm->ready == 0){ ucx_send_check(comm);}
   if (comm->ready == 0) { *request = NULL; return ncclSuccess;}
-  req = ucp_tag_send_nb(comm->ep, data, size, ucp_dt_make_contig(1), tag, send_handler);
+  
+  req = ucp_tag_send_nb(comm->ep, data, size, ucp_dt_make_contig(1), comm->tag, send_handler);
   if (UCS_PTR_IS_ERR(req)) {
-    NCCL_UCX_WARN("ucx_isend: unable to send message\n");
+    NCCL_UCX_WARN("ucx_isend: unable to send message (%s)\n", ucs_status_string(UCS_PTR_STATUS(req)));
     return ncclSystemError;
   }
   else if (req!= NULL){
@@ -336,14 +366,13 @@ ncclResult_t ucx_irecv(void* recv_comm, void* data, int size, void* mhandle, voi
   ucx_request *req;
   ucp_worker_h ucp_worker;
   ucx_recv_comm *comm = (ucx_recv_comm*) recv_comm;
-
-  if (comm->ready == 0){ ucx_recv_check(comm);}
-  if (comm->ready == 0) { *request = NULL; return ncclSuccess;}
+  //if (comm->ready == 0) { ucx_recv_check(comm);}
+  //if (comm->ready == 0) { *request = NULL; return ncclSuccess;}
+  
   ucp_worker = comm->worker;
-  req = ucp_tag_recv_nb(ucp_worker, data, size, ucp_dt_make_contig(1), tag, tag_mask, recv_handler);
+  req = ucp_tag_recv_nb(ucp_worker, data, size, ucp_dt_make_contig(1), comm->tag, tag_mask, recv_handler);
   if (UCS_PTR_IS_ERR(req)) {
-    NCCL_UCX_WARN("ucx_irecv: unable to receive message (%s)",
-            ucs_status_string(UCS_PTR_STATUS(req)));
+    NCCL_UCX_WARN("ucx_irecv: unable to receive message (%s)", ucs_status_string(UCS_PTR_STATUS(req)));
     return ncclSystemError;
   }else if (req != NULL){
     ucp_worker_progress(comm->worker);
@@ -356,7 +385,6 @@ ncclResult_t ucx_irecv(void* recv_comm, void* data, int size, void* mhandle, voi
 ncclResult_t ucx_test(void* request, int* done, int* size) {
   ucx_request *req = (ucx_request*)request;
   *done = 0;
-
   // we don't set size cause we don't use it later in ucx_flush
   //  if(size) *size = 0;
   if (request == 1){
@@ -374,45 +402,45 @@ ncclResult_t ucx_test(void* request, int* done, int* size) {
 }
 
 ncclResult_t ucx_close_send(void* send_comm) {
-  if (send_comm){
-    ucx_send_comm *comm;
-    void *close_req;
-    ucs_status_t status;
-    comm = (ucx_send_comm*) send_comm;
-    if (comm->ep){
-      close_req = ucp_ep_close_nb(comm->ep, UCP_EP_CLOSE_MODE_FLUSH);
-      if (UCS_PTR_IS_PTR(close_req)){
-        do{
-          ucp_worker_progress(comm->worker);
-          status = ucp_request_check_status(close_req);
-        }while(status == UCS_INPROGRESS);
-        ucp_request_free(close_req);
-      } else if (close_req != NULL){
-        NCCL_UCX_WARN("Failed to close UCX endpoint");
-      }
-    }
-    ucp_worker_destroy(comm->worker);
-    ucp_cleanup(comm->ctx);
-    int done = 1;
-    socketSend(comm->fd, &done, sizeof(int));
-    close(comm->fd);
-    free(comm);
-  }
+  // if (send_comm){
+  //   ucx_send_comm *comm;
+  //   void *close_req;
+  //   ucs_status_t status;
+  //   comm = (ucx_send_comm*) send_comm;
+  //   if (comm->ep){
+  //     close_req = ucp_ep_close_nb(comm->ep, UCP_EP_CLOSE_MODE_FLUSH);
+  //     if (UCS_PTR_IS_PTR(close_req)){
+  //       do{
+  //         ucp_worker_progress(comm->worker);
+  //         status = ucp_request_check_status(close_req);
+  //       }while(status == UCS_INPROGRESS);
+  //       ucp_request_free(close_req);
+  //     } else if (close_req != NULL){
+  //       NCCL_UCX_WARN("Failed to close UCX endpoint");
+  //     }
+  //   }
+  //   ucp_worker_destroy(comm->worker);
+  //   ucp_cleanup(comm->ctx);
+  //   int done = 1;
+  //   socketSend(comm->fd, &done, sizeof(int));
+  //   close(comm->fd);
+  //   free(comm);
+  // }
   return ncclSuccess;
 }
 
 ncclResult_t ucx_close_recv(void* recv_comm) {
-  if (recv_comm){
-    ucp_worker_h ucp_worker;
-    ucx_recv_comm *comm = (ucx_recv_comm*)recv_comm;
-    int peer_close_send;
-    socketReceive(comm->fd, &peer_close_send, sizeof(int));
-    ucp_worker = comm->worker;
-    ucp_worker_destroy(ucp_worker);
-    ucp_cleanup(comm->ctx);
-    close(comm->fd);
-    free(recv_comm);
-  }
+  // if (recv_comm){
+  //   ucp_worker_h ucp_worker;
+  //   ucx_recv_comm *comm = (ucx_recv_comm*)recv_comm;
+  //   int peer_close_send;
+  //   socketReceive(comm->fd, &peer_close_send, sizeof(int));
+  //   ucp_worker = comm->worker;
+  //   ucp_worker_destroy(ucp_worker);
+  //   ucp_cleanup(comm->ctx);
+  //   close(comm->fd);
+  //   free(recv_comm);
+  // }
   return ncclSuccess;
 }
 
