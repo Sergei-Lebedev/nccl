@@ -15,7 +15,7 @@ INC:= -I$(NCCL_HOME)/include -I$(CUDA_HOME)/include -I$(UCX_HOME)/include -Iincl
 CFLAGS:=-fPIC $(INC) -std=c99 -D_GNU_SOURCE -g -O0
 PLUGIN_SO:=$(BUILDDIR)/lib/libnccl-net.so
 PLUGIN_SO_CM:=$(BUILDDIR)/lib/libnccl-net.so
-FILES:=nccl_ucx.c utils.c ibvwrap.c
+FILES:=nccl_ucx_tm.c utils.c ibvwrap.c
 FILES_CM:=nccl_ucx_cm.c utils.c ibvwrap.c
 OBJS:=$(FILES:%.c=$(BUILDDIR)/obj/%.o)
 OBJS_CM:=$(FILES_CM:%.c=$(BUILDDIR)/obj/%.o)
