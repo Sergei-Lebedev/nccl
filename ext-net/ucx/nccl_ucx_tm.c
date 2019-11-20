@@ -26,6 +26,7 @@ pthread_mutex_t ncclIbLock = PTHREAD_MUTEX_INITIALIZER;
 struct ucx_listen_handle
 {
   union socketAddress connectAddr;
+  ucp_tag_t tag;
 };
 typedef struct ucx_listen_handle ucx_listen_handle;
 
@@ -33,6 +34,9 @@ struct ucx_listen_comm
 {
   int fd;
   int dev;
+  ucp_context_h ctx;
+  ucp_worker_h worker;
+  ucp_tag_t tag;
 };
 typedef struct ucx_listen_comm ucx_listen_comm;
 
@@ -162,6 +166,7 @@ static ncclResult_t ucx_worker_get_netaddress(ucp_worker_h worker, ucp_address_t
   memcpy(*address, attr.address, attr.address_length);
   *address_length = attr.address_length;
   free(attr.address);
+  return ncclSuccess;
 }
 
 #define UCX_SHARED_WORKER
@@ -300,6 +305,8 @@ ncclResult_t ucx_listen(int dev, void *handle, void **listen_comm) {
   comm->dev = dev;
   NCCLCHECK(get_socket_addr(&(my_handle->connectAddr)));
   NCCLCHECK(createListenSocket(&comm->fd, &my_handle->connectAddr));
+  NCCLCHECK(ucx_get_ctx_and_worker(dev, &comm->ctx, &comm->worker, &comm->tag));
+  my_handle->tag = comm->tag;
   *listen_comm = comm;
 
   return ncclSuccess;
@@ -315,7 +322,8 @@ ncclResult_t ucx_connect(int dev, void *handle, void **send_comm) {
   ucx_send_comm *comm = (ucx_send_comm *) calloc(1, sizeof(ucx_send_comm));
  
   NCCLCHECK(connectAddress(&comm->fd, &recv_handle->connectAddr));
-  NCCLCHECK(ucx_get_ctx_and_worker(dev, &comm->ctx, &comm->worker, &comm->tag));
+  NCCLCHECK(ucx_get_ctx_and_worker(dev, &comm->ctx, &comm->worker, NULL));
+  comm->tag = recv_handle->tag;
   NCCLCHECK(ucx_worker_get_netaddress(comm->worker, &my_addr, &local_addr_len));
   NCCL_UCX_INFO(NCCL_NET, "Worker address length: %zu", local_addr_len);
 
@@ -333,7 +341,6 @@ ncclResult_t ucx_connect(int dev, void *handle, void **send_comm) {
   NCCLCHECK(socketSend(comm->fd, &tail_adr, sizeof(uint64_t)));
   NCCLCHECK(socketSend(comm->fd, &local_addr_len, sizeof(size_t)));
   NCCLCHECK(socketSend(comm->fd, my_addr, local_addr_len));
-  NCCLCHECK(socketSend(comm->fd, &comm->tag, sizeof(ucp_tag_t)));
 
   *send_comm = comm;
   free(my_addr);
@@ -352,8 +359,7 @@ ncclResult_t ucx_accept(void *listen_comm, void **recv_comm) {
   socklen_t socklen = sizeof(struct sockaddr_in);
   SYSCHECKVAL(accept(l_comm->fd, (struct sockaddr_in *)&sockaddr, &socklen), "accept", r_comm->fd);
 
-  NCCLCHECK(ucx_get_ctx_and_worker(l_comm->dev, &r_comm->ctx, &r_comm->worker, NULL));
-
+  r_comm->ctx = l_comm->ctx; r_comm->worker = l_comm->worker; r_comm->tag = l_comm->tag;
   NCCLCHECK(socketReceive(r_comm->fd, &rkey_buf_size, sizeof(size_t)));
   rkey_buf = malloc(rkey_buf_size);
   NCCLCHECK(socketReceive(r_comm->fd, rkey_buf, rkey_buf_size));
@@ -365,7 +371,6 @@ ncclResult_t ucx_accept(void *listen_comm, void **recv_comm) {
   NCCLCHECK(socketReceive(r_comm->fd, &peer_addr_len, sizeof(size_t)));
   peer_addr = malloc(peer_addr_len);
   NCCLCHECK(socketReceive(r_comm->fd, peer_addr, peer_addr_len));
-  NCCLCHECK(socketReceive(r_comm->fd, &r_comm->tag, sizeof(ucp_tag_t)));
   ep_params.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS; //|
   //                         UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE;
   ep_params.address = peer_addr;
