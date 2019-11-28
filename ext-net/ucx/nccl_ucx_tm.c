@@ -67,6 +67,7 @@ struct ucx_send_comm
   ucp_worker_h worker;
   ucp_ep_h ep;
   ucp_tag_t tag;
+  ucp_tag_t ctag;
   int fd;
   int ready;
   uint32_t fifo_head;
@@ -81,6 +82,7 @@ struct ucx_recv_comm
   ucp_worker_h worker;
   ucp_ep_h ep;
   ucp_tag_t tag;
+  ucp_tag_t ctag;
   int fd;
   int ready;
   uint64_t rem_tail_addr;
@@ -126,17 +128,11 @@ static ncclResult_t get_socket_addr(union socketAddress *addr) {
 static ncclResult_t ucx_init_context(ucp_context_h *ctx, int dev) {
   ucp_params_t ucp_params;
   ucp_config_t *config;
+  char ucx_dev_name[PATH_MAX];
 
-  char ucx_prefix[PATH_MAX];  //DEV_####
-  char ucx_env_var[PATH_MAX]; //UCX_DEV_####_NET_DEVICES
-  char ucx_env_val[PATH_MAX]; //e.g. mlx5_0:1
-
-  snprintf(ucx_prefix, PATH_MAX, "DEV_%d", dev);
-  snprintf(ucx_env_var, PATH_MAX, "UCX_%s_NET_DEVICES", ucx_prefix);
-  snprintf(ucx_env_val, PATH_MAX, "%s:%d", ncclIbDevs[dev].devName, ncclIbDevs[dev].port);
-  setenv(ucx_env_var, ucx_env_val, 0);
-  UCXCHECK(ucp_config_read(ucx_prefix, NULL, &config));
-
+  snprintf(ucx_dev_name, PATH_MAX, "%s:%d", ncclIbDevs[dev].devName, ncclIbDevs[dev].port);
+  UCXCHECK(ucp_config_read("NCCL", NULL, &config));
+  UCXCHECK(ucp_config_modify(config, "NET_DEVICES", ucx_dev_name));
   memset(&ucp_params, 0, sizeof(ucp_params));
   ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES |
                           UCP_PARAM_FIELD_REQUEST_SIZE |
@@ -184,7 +180,7 @@ static ncclResult_t ucx_get_ctx_and_worker(int dev, ucp_context_h *ctx, ucp_work
   *ctx = workers[dev].ctx;
   *worker = workers[dev].worker;
   if (newtag != NULL) {
-    *newtag = tag + 2 * workers[dev].count;
+    *newtag = tag +  workers[dev].count;
   }
   workers[dev].count++;
 #else
@@ -322,7 +318,7 @@ ncclResult_t ucx_connect(int dev, void *handle, void **send_comm) {
   ucx_send_comm *comm = (ucx_send_comm *) calloc(1, sizeof(ucx_send_comm));
  
   NCCLCHECK(connectAddress(&comm->fd, &recv_handle->connectAddr));
-  NCCLCHECK(ucx_get_ctx_and_worker(dev, &comm->ctx, &comm->worker, NULL));
+  NCCLCHECK(ucx_get_ctx_and_worker(dev, &comm->ctx, &comm->worker, &comm->ctag));
   comm->tag = recv_handle->tag;
   NCCLCHECK(ucx_worker_get_netaddress(comm->worker, &my_addr, &local_addr_len));
   NCCL_UCX_INFO(NCCL_NET, "Worker address length: %zu", local_addr_len);
@@ -341,6 +337,7 @@ ncclResult_t ucx_connect(int dev, void *handle, void **send_comm) {
   NCCLCHECK(socketSend(comm->fd, &tail_adr, sizeof(uint64_t)));
   NCCLCHECK(socketSend(comm->fd, &local_addr_len, sizeof(size_t)));
   NCCLCHECK(socketSend(comm->fd, my_addr, local_addr_len));
+  NCCLCHECK(socketSend(comm->fd, &comm->ctag, sizeof(ucp_tag_t)));
 
   *send_comm = comm;
   free(my_addr);
@@ -377,7 +374,7 @@ ncclResult_t ucx_accept(void *listen_comm, void **recv_comm) {
   //  ep_params.err_mode        = err_handling_opt.ucp_err_mode;
   UCXCHECK(ucp_ep_create(r_comm->worker, &ep_params, &r_comm->ep));
   UCXCHECK(ucp_ep_rkey_unpack(r_comm->ep, rkey_buf, &r_comm->rkey));
-
+  NCCLCHECK(socketReceive(r_comm->fd, &r_comm->ctag, sizeof(ucp_tag_t)));
   free(peer_addr);
   free(rkey_buf);
   *recv_comm = r_comm;
@@ -394,7 +391,7 @@ ncclResult_t ucx_send_check(ucx_send_comm *comm) {
 
   ucp_worker_progress(comm->worker);
 
-  msg_tag = ucp_tag_probe_nb(comm->worker, comm->tag + 1, tag_mask, 1, &info_tag);
+  msg_tag = ucp_tag_probe_nb(comm->worker, comm->ctag, tag_mask, 1, &info_tag);
   if (msg_tag == NULL) {
     return ncclSuccess;
   }
@@ -430,7 +427,7 @@ ncclResult_t ucx_recv_check(ucx_recv_comm *comm) {
     comm->msg = calloc(1, msg_len);
     comm->msg->addr_len = local_addr_len;
     memcpy(comm->msg + 1, my_addr, local_addr_len);
-    comm->connect_req = ucp_tag_send_nb(comm->ep, comm->msg, msg_len, ucp_dt_make_contig(1), comm->tag + 1, send_handler);
+    comm->connect_req = ucp_tag_send_nb(comm->ep, comm->msg, msg_len, ucp_dt_make_contig(1), comm->ctag, send_handler);
     if (UCS_PTR_IS_ERR(comm->connect_req)) {
       NCCL_UCX_WARN("Unable to send connect message");
       return ncclSystemError;
