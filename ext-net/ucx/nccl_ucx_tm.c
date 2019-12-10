@@ -180,7 +180,7 @@ static ncclResult_t ucx_get_ctx_and_worker(int dev, ucp_context_h *ctx, ucp_work
   *ctx = workers[dev].ctx;
   *worker = workers[dev].worker;
   if (newtag != NULL) {
-    *newtag = tag +  workers[dev].count;
+    *newtag = tag + workers[dev].count;
   }
   workers[dev].count++;
 #else

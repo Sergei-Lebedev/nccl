@@ -27,10 +27,20 @@
   }                                                      \
 } while(0)
 
+// Propagate errors up
+#define NCCLCHECK(call) do { \
+  ncclResult_t res = call; \
+  if (res != ncclSuccess) { \
+    /* Print the back trace*/ \
+    INFO(NCCL_ALL,"%s:%d -> %d", __FILE__, __LINE__, res);    \
+    return res; \
+  } \
+} while (0);
+
 
 ncclDebugLogger_t ucx_log_function = NULL;
 static const ucp_tag_t tag  = 0xABADBABE;
-static const ucp_tag_t tag_mask = 0;//0xFFFFFFFFFFFFFFFF; //recieve any message
+static const ucp_tag_t tag_mask = 0xFFFFFFFFFFFFFFFF; //recieve any message
 
 static int ncclNIbDevs = -1;
 
@@ -80,17 +90,22 @@ ncclResult_t ucx_regmr(void* comm, void* data, int size, int type, void** mhandl
   ucp_mem_map_params_t mmap_params;
   ucp_context_h *ctx = (ucp_context_h*)comm;
 
+  // uint64_t addr = (uint64_t)data;
+  // uint64_t reg_addr = addr & (~(REG_ALIGN-1));
+  // uint64_t reg_size = addr+size - reg_addr;
+  // reg_size = ((reg_size + REG_ALIGN-1) / REG_ALIGN ) * REG_ALIGN;
+
   uint64_t addr = (uint64_t)data;
-  uint64_t reg_addr = addr & (~(REG_ALIGN-1));
-  uint64_t reg_size = addr+size - reg_addr;
+  uint64_t reg_addr = addr;
+  uint64_t reg_size = size;
   reg_size = ((reg_size + REG_ALIGN-1) / REG_ALIGN ) * REG_ALIGN;
 
+
+  //fprintf(stderr, "want to map addr %p %zu memtype %d\n", (void*)reg_addr, reg_size, type);
   mmap_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
-                           UCP_MEM_MAP_PARAM_FIELD_LENGTH;
-                           UCP_MEM_MAP_PARAM_FIELD_FLAGS;
+                           UCP_MEM_MAP_PARAM_FIELD_LENGTH; 
   mmap_params.address    = (void*)reg_addr;
   mmap_params.length     = reg_size;
-  mmap_params.flags      = UCP_MEM_MAP_FIXED;
   ucp_mem_map(*ctx, &mmap_params, (ucp_mem_h*)mhandle);
   return ncclSuccess;
 }
