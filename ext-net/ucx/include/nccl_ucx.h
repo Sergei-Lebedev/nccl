@@ -10,6 +10,8 @@
 #include "nccl_ucx_log.h"
 #include "nccl.h"
 #include <ucp/api/ucp.h>
+#include "ibvwrap.h"
+
 #define UCXCHECK(cmd) do {                               \
   int e = cmd;                                           \
   if( UCS_OK != e ) {                                    \
@@ -40,7 +42,7 @@
 
 ncclDebugLogger_t ucx_log_function = NULL;
 static const ucp_tag_t tag  = 0xABADBABE;
-static const ucp_tag_t tag_mask = 0xFFFFFFFFFFFFFFFF; //recieve any message
+static const ucp_tag_t tag_mask = 0xFFFFFFFFFFFFFFFF;
 
 static int ncclNIbDevs = -1;
 
@@ -58,6 +60,12 @@ struct userIbDev {
   char devName[MAXNAMESIZE];
   uint16_t port_en;
 };
+
+struct ucx_mhandle {
+  ucp_mem_h ucp_memh;
+  ucp_rkey_h rkey;
+};
+typedef struct ucx_mhandle ucx_mhandle;
 
 #define MAX_IB_DEVS 16
 struct ncclIbDev ncclIbDevs[MAX_IB_DEVS];
@@ -79,45 +87,20 @@ ncclResult_t ucx_pci_path(int dev, char** path) {
   return ncclSuccess;
 }
 
+ncclResult_t ncclIbGdrSupport(int ibDev) {
+  static int moduleLoaded = -1;
+  if (moduleLoaded == -1) {
+    moduleLoaded = (access("/sys/kernel/mm/memory_peers/nv_mem/version", F_OK) == -1) ? 0 : 1;
+  }
+  if (moduleLoaded == 0) return ncclSystemError;
+  return ncclSuccess;
+}
+
 ncclResult_t ucx_ptr_support(int dev, int* supported_types) {
   *supported_types = (NCCL_PTR_HOST | NCCL_PTR_CUDA);
   //*supported_types = NCCL_PTR_HOST;
   return ncclSuccess;
 }
 
-#define REG_ALIGN (4096)
-ncclResult_t ucx_regmr(void* comm, void* data, int size, int type, void** mhandle){
-  ucp_mem_map_params_t mmap_params;
-  ucp_context_h *ctx = (ucp_context_h*)comm;
-
-  // uint64_t addr = (uint64_t)data;
-  // uint64_t reg_addr = addr & (~(REG_ALIGN-1));
-  // uint64_t reg_size = addr+size - reg_addr;
-  // reg_size = ((reg_size + REG_ALIGN-1) / REG_ALIGN ) * REG_ALIGN;
-
-  uint64_t addr = (uint64_t)data;
-  uint64_t reg_addr = addr;
-  uint64_t reg_size = size;
-  reg_size = ((reg_size + REG_ALIGN-1) / REG_ALIGN ) * REG_ALIGN;
-
-
-  //fprintf(stderr, "want to map addr %p %zu memtype %d\n", (void*)reg_addr, reg_size, type);
-  mmap_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
-                           UCP_MEM_MAP_PARAM_FIELD_LENGTH; 
-  mmap_params.address    = (void*)reg_addr;
-  mmap_params.length     = reg_size;
-  ucp_mem_map(*ctx, &mmap_params, (ucp_mem_h*)mhandle);
-  return ncclSuccess;
-}
-
-ncclResult_t ucx_deregmr(void* comm, void* mhandle){
-  ucp_context_h *ctx = (ucp_context_h*)comm;
-  ucp_mem_unmap(*ctx, mhandle);
-  return ncclSuccess;
-}
-
-ncclResult_t ucx_flush(void* recv_comm, void* data, int size, void* mhandle) {
-  return ncclSuccess;
-}
 
 #endif
